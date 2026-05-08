@@ -6,6 +6,7 @@ module Repositories
     include Gitlab::Utils::StrongMemoize
 
     LFS_TRANSFER_CONTENT_TYPE = 'application/octet-stream'
+    LFS_TUS_TRANSFER_ADAPTER = 'tus'
     # Downloading directly with presigned URLs via batch requests
     # require longer expire time.
     # The 1h should be enough to download 100 objects.
@@ -28,7 +29,7 @@ module Repositories
       if download_request?
         render json: { objects: download_objects! }, content_type: LfsRequest::CONTENT_TYPE
       elsif upload_request?
-        render json: { objects: upload_objects! }, content_type: LfsRequest::CONTENT_TYPE
+        render json: upload_response, content_type: LfsRequest::CONTENT_TYPE
       else
         raise "Never reached"
       end
@@ -91,6 +92,12 @@ module Repositories
       objects
     end
 
+    def upload_response
+      { objects: upload_objects! }.tap do |response|
+        response[:transfer] = LFS_TUS_TRANSFER_ADAPTER if tus_upload_request?
+      end
+    end
+
     def download_actions(object, lfs_object)
       lfs_file = lfs_object.file
       if lfs_file.file_storage? || lfs_file.proxy_download_enabled?
@@ -128,10 +135,21 @@ module Repositories
     end
 
     def upload_actions(object)
+      return tus_upload_actions(object) if tus_upload_request?
+
       {
         upload: {
           href: "#{upload_http_url_to_repo}/gitlab-lfs/objects/#{object[:oid]}/#{object[:size]}",
           header: upload_headers
+        }
+      }
+    end
+
+    def tus_upload_actions(object)
+      {
+        upload: {
+          href: "#{upload_http_url_to_repo}/gitlab-lfs/objects/#{object[:oid]}/#{object[:size]}/tus",
+          header: tus_upload_headers
         }
       }
     end
@@ -149,6 +167,16 @@ module Repositories
         'Content-Type': LFS_TRANSFER_CONTENT_TYPE,
         'Transfer-Encoding': 'chunked'
       }
+    end
+
+    def tus_upload_headers
+      {
+        Authorization: authorization_header
+      }.compact
+    end
+
+    def tus_upload_request?
+      upload_request? && Array.wrap(params[:transfers]).include?(LFS_TUS_TRANSFER_ADAPTER)
     end
 
     def lfs_check_batch_operation!

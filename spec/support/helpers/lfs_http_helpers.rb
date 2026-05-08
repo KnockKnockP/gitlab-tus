@@ -40,6 +40,10 @@ module LfsHttpHelpers
     File.join(["#{container.http_url_to_repo}/gitlab-lfs/objects", oid, size].compact.map(&:to_s))
   end
 
+  def tus_objects_url(container, oid, size)
+    File.join(objects_url(container, oid, size), 'tus')
+  end
+
   def authorize_url(container, oid, size)
     File.join(objects_url(container, oid, size), 'authorize')
   end

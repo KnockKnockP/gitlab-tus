@@ -6,13 +6,24 @@ module Repositories
     include WorkhorseRequest
     include SendFileUpload
 
-    skip_before_action :verify_workhorse_api!, only: :download
+    TUS_ERROR_HTTP_STATUS = {
+      invalid_upload_offset: :bad_request,
+      unsupported_media_type: :unsupported_media_type,
+      upload_offset_mismatch: :conflict,
+      payload_too_large: :payload_too_large,
+      invalid_record: :forbidden,
+      invalid_path: :forbidden,
+      remote_store_error: :forbidden,
+      invalid_uploaded_file: :bad_request
+    }.freeze
+
+    skip_before_action :verify_workhorse_api!, only: [:download, :tus_head, :tus_upload, :tus_options]
 
     # added here as a part of the refactor, will be removed
     # https://gitlab.com/gitlab-org/gitlab/-/issues/328692
     delegate :deploy_token, :user, to: :authentication_result, allow_nil: true
     urgency :medium, [:download, :upload_authorize]
-    urgency :low, [:upload_finalize]
+    urgency :low, [:upload_finalize, :tus_head, :tus_upload, :tus_options]
 
     def download
       return render_lfs_not_found unless project
@@ -68,6 +79,27 @@ module Repositories
       end
     end
 
+    def tus_head
+      return unless ensure_supported_tus_version
+
+      set_tus_headers(upload_service.offset)
+      head :ok
+    end
+
+    def tus_upload
+      return unless ensure_supported_tus_version
+
+      service_response = upload_service.patch
+      set_tus_headers(service_response.payload[:current_offset])
+
+      head(service_response.success? ? :no_content : tus_error_http_status(service_response.reason))
+    end
+
+    def tus_options
+      headers['Tus-Version'] = Lfs::TusUploadService::TUS_VERSION
+      head :no_content
+    end
+
     private
 
     def download_request?
@@ -75,7 +107,7 @@ module Repositories
     end
 
     def upload_request?
-      %w[upload_authorize upload_finalize].include? action_name
+      %w[upload_authorize upload_finalize tus_head tus_upload tus_options].include? action_name
     end
 
     def oid
@@ -88,6 +120,35 @@ module Repositories
 
     def uploaded_file
       params[:file]
+    end
+
+    def upload_service
+      @upload_service ||= Lfs::TusUploadService.new(
+        project: project,
+        oid: oid,
+        size: size,
+        request: request,
+        repository_type: repo_type.name
+      )
+    end
+
+    def ensure_supported_tus_version
+      return true if request.headers['Tus-Resumable'] == Lfs::TusUploadService::TUS_VERSION
+
+      headers['Tus-Version'] = Lfs::TusUploadService::TUS_VERSION
+      head :precondition_failed
+      false
+    end
+
+    def set_tus_headers(offset)
+      headers['Tus-Resumable'] = Lfs::TusUploadService::TUS_VERSION
+      headers['Upload-Offset'] = offset.to_s
+      headers['Upload-Length'] = size.to_s
+      headers['Cache-Control'] = 'no-store'
+    end
+
+    def tus_error_http_status(reason)
+      TUS_ERROR_HTTP_STATUS.fetch(reason, :unprocessable_entity)
     end
   end
 end
