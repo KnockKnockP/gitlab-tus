@@ -36,6 +36,9 @@ scope(path: '*repository_path', format: false) do
         get '/', action: :download
 
         constraints(size: /[0-9]+/) do
+          match '/*size/tus', action: :tus_options, via: :options
+          match '/*size/tus', action: :tus_head, via: :head
+          patch '/*size/tus', action: :tus_upload
           put '/*size/authorize', action: :upload_authorize
           put '/*size', action: :upload_finalize
         end

@@ -655,8 +655,8 @@ RSpec.describe 'Git LFS API and storage', feature_category: :source_code_managem
                 it_behaves_like 'pushes new LFS objects', renew_authorization: true
               end
 
-              context 'when pushing one new and one existing LFS object' do
-                let(:body) { upload_body(multiple_objects) }
+            context 'when pushing one new and one existing LFS object' do
+              let(:body) { upload_body(multiple_objects) }
 
                 it_behaves_like 'LFS http 200 response'
 
@@ -675,6 +675,27 @@ RSpec.describe 'Git LFS API and storage', feature_category: :source_code_managem
                 end
 
                 it_behaves_like 'process authorization header', renew_authorization: true
+              end
+
+              context 'when pushing a LFS object with TUS transfers enabled' do
+                let(:body) { upload_body(sample_object).merge('transfers' => %w[basic tus]) }
+                let(:sample_oid) { non_existing_object_oid }
+                let(:sample_size) { non_existing_object_size }
+
+                it_behaves_like 'LFS http 200 response'
+
+                it 'responds with the TUS transfer adapter and upload link' do
+                  expect(json_response['transfer']).to eq('tus')
+                  expect(json_response['objects']).to be_kind_of(Array)
+                  expect(json_response['objects'].first).to include(sample_object)
+                  expect(json_response['objects'].first['actions']['upload']['href'])
+                    .to eq(tus_objects_url(project, sample_oid, sample_size))
+
+                  headers = json_response['objects'].first['actions']['upload']['header']
+                  expect(headers['Authorization']).to be_present
+                  expect(headers).not_to include('Content-Type')
+                  expect(headers).not_to include('Transfer-Encoding')
+                end
               end
             end
 
@@ -736,10 +757,65 @@ RSpec.describe 'Git LFS API and storage', feature_category: :source_code_managem
           end
         end
 
-        describe 'unsupported' do
-          let(:body) { request_body('other', sample_object) }
+      describe 'unsupported' do
+        let(:body) { request_body('other', sample_object) }
 
-          it_behaves_like 'LFS http 404 response'
+        it_behaves_like 'LFS http 404 response'
+      end
+    end
+
+      describe 'when handling TUS upload request' do
+        let(:sample_oid) { non_existing_object_oid }
+        let(:sample_size) { non_existing_object_size }
+        let(:authorization) { authorize_user }
+        let(:tus_headers) do
+          {
+            'HTTP_TUS_RESUMABLE' => '1.0.0',
+            'CONTENT_TYPE' => 'application/offset+octet-stream'
+          }
+        end
+        let(:headers) { tus_headers.merge('HTTP_AUTHORIZATION' => authorization) }
+
+        before do
+          project.add_developer(user)
+        end
+
+        describe 'OPTIONS' do
+          subject(:request) { options tus_objects_url(project, sample_oid, sample_size), headers: headers }
+
+          it 'advertises the supported TUS version' do
+            expect(request).to have_gitlab_http_status(:no_content)
+            expect(response.headers['Tus-Version']).to eq('1.0.0')
+          end
+        end
+
+        describe 'HEAD' do
+          subject(:request) { head tus_objects_url(project, sample_oid, sample_size), headers: headers }
+
+          it 'returns the upload offset and length' do
+            expect(request).to have_gitlab_http_status(:ok)
+            expect(response.headers['Tus-Resumable']).to eq('1.0.0')
+            expect(response.headers['Upload-Offset']).to eq('0')
+            expect(response.headers['Upload-Length']).to eq(sample_size.to_s)
+          end
+        end
+
+        describe 'PATCH' do
+          subject(:request) do
+            patch tus_objects_url(project, sample_oid, sample_size),
+              params: 'hello',
+              headers: headers.merge(
+                'HTTP_UPLOAD_OFFSET' => '0',
+                'CONTENT_LENGTH' => '5'
+              )
+          end
+
+          it 'accepts the chunk and advances the offset' do
+            expect(request).to have_gitlab_http_status(:no_content)
+            expect(response.headers['Tus-Resumable']).to eq('1.0.0')
+            expect(response.headers['Upload-Offset']).to eq('5')
+            expect(response.headers['Upload-Length']).to eq(sample_size.to_s)
+          end
         end
       end
 
